@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+@theme {
+  --color-dark-bg: #1e1e1e;
+  --color-dark-panel: #252526;
+  --color-dark-border: #3e3e42;
+  --color-blue-accent: #007acc;
+  --color-text-primary: #cccccc;
+  --color-text-secondary: #969696;
+  --color-editor-bg: #1e1e1e;
+  --color-sidebar-bg: #252526;
+  --color-button-bg: #0e639c;
+  --color-button-hover: #1177bb;
+  --color-red-button: #d73a49;
+  --color-red-button-hover: #cb2431;
+}
+
+
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Custom animations for the landing page */
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes spin-slow-reverse {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+/* Custom utility classes */
+.animate-spin-slow {
+  animation: spin-slow 20s linear infinite;
+}
+
+.animate-spin-slow-reverse {
+  animation: spin-slow-reverse 15s linear infinite;
+}
+
+@keyframes animate-svg-stroke-1 {
+  0% {
+    stroke-dashoffset: 201.9734px;
+    stroke-dasharray: 201.9734px;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    stroke-dasharray: 201.9734px;
+  }
+}
+
+.thinking-svg .svg-elem-1 {
+  animation: animate-svg-stroke-1 1s ease-in infinite alternate;
+}
+
+/* Custom margin classes */
+.ml-15 {
+  margin-left: 3.75rem;
+}
+
+.ml-30 {
+  margin-left: 7.5rem;
+}
+
+.ml-50 {
+  margin-left: 12.5rem;
+}

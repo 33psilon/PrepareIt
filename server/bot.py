@@ -7,6 +7,7 @@
 import os
 import sys
 import asyncio
+from contextlib import asynccontextmanager
 
 if sys.platform == "win32": # windows utf 8 reconfig
     try:
@@ -27,30 +28,38 @@ from pipecat.frames.frames import (
     LLMTextFrame,
     TranscriptionFrame,
     InterimTranscriptionFrame,
-    TextFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.processors.frameworks.rtvi import RTVIClientMessageFrame, RTVIServerMessageFrame
-from pipecat.runner.types import RunnerArguments
+from pipecat.processors.frameworks.rtvi import (
+    RTVIClientMessageFrame,
+    RTVIConfig,
+    RTVIObserver,
+    RTVIProcessor,
+    RTVIServerMessageFrame,
+)
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pipecat.runner.types import RunnerArguments, SmallWebRTCRunnerArguments
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-from pipecat.utils.text.pattern_pair_aggregator import PatternPairAggregator
+from pipecat.transports.smallwebrtc.request_handler import (
+    SmallWebRTCRequest,
+    SmallWebRTCRequestHandler,
+)
 
 try:
-    from .agents.editor_agent import validate_and_format_edit
     from .agents.evaluator import run_debrief_evaluator
     from .orchestrator import OrchestratorAgent, interview_tools
     from .services.problem_service import ProblemService
     from .state import InterviewState
 except ImportError:
-    from agents.editor_agent import validate_and_format_edit
     from agents.evaluator import run_debrief_evaluator
     from orchestrator import OrchestratorAgent, interview_tools
     from services.problem_service import ProblemService
@@ -70,11 +79,14 @@ logger.add(
 
 
 class CodeAwareTranscriptProcessor(FrameProcessor):
-    def __init__(self, **kwargs):
+    def __init__(self, state: InterviewState, **kwargs):
         super().__init__(**kwargs)
+        self.state = state
         self._current_code = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, RTVIClientMessageFrame):
             msg_type = getattr(frame, "type", None) or (
                 frame.data.get("type") if hasattr(frame, "data") and isinstance(frame.data, dict) else None
@@ -83,8 +95,8 @@ class CodeAwareTranscriptProcessor(FrameProcessor):
                 payload = frame.data.get("data", frame.data) if hasattr(frame, "data") and isinstance(frame.data, dict) else {}
                 code = payload.get("code", "") if isinstance(payload, dict) else ""
                 self._current_code = code
+                self.state.latest_code = code
                 logger.info(f"Received updated candidate code snapshot ({len(self._current_code)} chars)")
-                await self.push_frame(TextFrame(text=f"CODE_UPDATE:{self._current_code}"), direction)
                 return
 
         if isinstance(frame, TranscriptionFrame) and not isinstance(frame, InterimTranscriptionFrame):
@@ -133,6 +145,8 @@ class ResponseSeparatorProcessor(FrameProcessor):
             await self.push_frame(frame, direction)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, LLMFullResponseStartFrame):
             self.reset_state()
             await self.push_frame(frame, direction)
@@ -227,15 +241,16 @@ class ResponseSeparatorProcessor(FrameProcessor):
 
         elif isinstance(frame, LLMFullResponseEndFrame):
             if self.state == "code" or bool(self._code_buffer.strip()):
-                await self.push_frame(
-                    RTVIServerMessageFrame(
-                        data={
-                            "type": "code_response_complete",
-                            "data": {"status": "finished"},
-                        }
-                    ),
-                    direction,
+                complete_frame = RTVIServerMessageFrame(
+                    data={
+                        "type": "code_response_complete",
+                        "data": {"status": "finished"},
+                    }
                 )
+                if self.rtvi is not None:
+                    await self.rtvi.push_frame(complete_frame)
+                else:
+                    await self.push_frame(complete_frame, direction)
             self.reset_state()
             await self.push_frame(frame, direction)
         else:
@@ -248,13 +263,29 @@ async def run_bot(transport: BaseTransport):
     request_data = getattr(transport, "request_data", None) or {}
     problem_slug = request_data.get("problemSlug") if isinstance(request_data, dict) else None
     problem_slug = str(problem_slug or os.getenv("PROBLEM_SLUG", "two-sum")).strip().lower()
-    problem = ProblemService.fetch(problem_slug)
+    problem = await asyncio.to_thread(ProblemService.fetch, problem_slug)
     logger.info(f"Loaded grounded problem: {problem.title} ({problem.difficulty})")
 
     state = InterviewState(
         session_id=os.getenv("SESSION_ID", "local-session"),
         problem_title=problem.title,
-        problem_description=problem.description,
+        problem_description="\n\n".join(
+            section
+            for section in (
+                problem.description,
+                "Examples:\n"
+                + "\n".join(
+                    f"Example {index}: Input: {example.get('input', '')}; "
+                    f"Output: {example.get('output', '')}"
+                    + (f"; Explanation: {example['explanation']}" if example.get("explanation") else "")
+                    for index, example in enumerate(problem.examples, start=1)
+                )
+                if problem.examples
+                else "",
+                "Constraints:\n" + "\n".join(problem.constraints) if problem.constraints else "",
+            )
+            if section
+        ),
     )
     orchestrator = OrchestratorAgent(state)
 
@@ -262,18 +293,9 @@ async def run_bot(transport: BaseTransport):
         api_key=os.getenv("DEEPGRAM_API_KEY", "").strip(),
     )
 
-    pattern_aggregator = PatternPairAggregator()
-    pattern_aggregator.add_pattern_pair(
-        pattern_id="audio_response",
-        start_pattern="[audio response]",
-        end_pattern="[code response]",
-        remove_match=True,
-    )
-
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY", "").strip(),
         voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",
-        text_aggregator=pattern_aggregator,
     )
 
     system_instruction = (
@@ -312,12 +334,14 @@ async def run_bot(transport: BaseTransport):
     user_aggregator = context_aggregator.user()
     assistant_aggregator = context_aggregator.assistant()
 
-    response_separator = ResponseSeparatorProcessor(None)
+    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+    response_separator = ResponseSeparatorProcessor(rtvi)
     pipeline = Pipeline(
         [
             transport.input(),
+            rtvi,
             stt,
-            CodeAwareTranscriptProcessor(),
+            CodeAwareTranscriptProcessor(state),
             orchestrator,
             user_aggregator,
             llm,
@@ -334,9 +358,13 @@ async def run_bot(transport: BaseTransport):
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        observers=[RTVIObserver(rtvi)],
     )
 
-    response_separator.rtvi = task.rtvi
+    @rtvi.event_handler("on_client_ready")
+    async def on_client_ready(rtvi):
+        logger.info("RTVI client is ready; sending bot-ready signal")
+        await rtvi.set_bot_ready()
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, webrtc_connection):
@@ -392,6 +420,62 @@ async def bot(runner_args: RunnerArguments):
 
 
 if __name__ == "__main__":
-    from pipecat.runner.run import main
+    import uvicorn
 
-    main()
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "7860"))
+    webrtc_handler = SmallWebRTCRequestHandler(host=host)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        yield
+        await webrtc_handler.close()
+
+    app = FastAPI(lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
+
+    @app.get("/api/problems")
+    def get_problems():
+        return ProblemService.catalog()
+
+    @app.get("/api/problem/{slug}")
+    def get_problem(slug: str):
+        try:
+            return ProblemService.fetch(slug).model_dump()
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/api/offer")
+    async def offer(request: Request, background_tasks: BackgroundTasks):
+        payload = await request.json()
+        offer_request = SmallWebRTCRequest(
+            sdp=payload["sdp"],
+            type=payload["type"],
+            pc_id=payload.get("pc_id"),
+            restart_pc=payload.get("restart_pc"),
+            request_data=payload.get("requestData", payload.get("request_data")),
+        )
+
+        async def start_bot(connection):
+            connection.request_data = offer_request.request_data
+            background_tasks.add_task(
+                bot,
+                SmallWebRTCRunnerArguments(webrtc_connection=connection),
+            )
+
+        return await webrtc_handler.handle_web_request(
+            request=offer_request,
+            webrtc_connection_callback=start_bot,
+        )
+
+    uvicorn.run(app, host=host, port=port)

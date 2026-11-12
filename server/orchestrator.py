@@ -1,11 +1,11 @@
 from loguru import logger
 from pipecat.frames.frames import (
     Frame,
-    LLMMessagesFrame,
+    InterimTranscriptionFrame,
+    LLMMessagesAppendFrame,
     LLMTextFrame,
     TextFrame,
     TranscriptionFrame,
-    InterimTranscriptionFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.llm_service import FunctionCallParams
@@ -68,6 +68,8 @@ class OrchestratorAgent(FrameProcessor):
         )
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         # Intercept code synchronization updates
         if isinstance(frame, TextFrame) and frame.text.startswith("CODE_UPDATE:"):
             self.state.latest_code = frame.text.removeprefix("CODE_UPDATE:").strip()
@@ -86,8 +88,8 @@ class OrchestratorAgent(FrameProcessor):
             if frame.text:
                 self._current_assistant_turn.append(frame.text)
 
-        # Intercept explicit message frames to inject state prompt
-        if isinstance(frame, LLMMessagesFrame):
+        # Keep the current phase guidance fresh when a message is appended.
+        if isinstance(frame, LLMMessagesAppendFrame):
             frame.messages.insert(0, {"role": "system", "content": self.system_prompt()})
 
         await self.push_frame(frame, direction)

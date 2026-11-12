@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -71,14 +72,16 @@ async def run_debrief_evaluator(transcript: str, final_code: str, problem_desc: 
     def generate() -> EvaluationReport:
         try:
             from google import genai
-            api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+            api_key = os.getenv("GOOGLE_API_KEY", "").strip() or os.getenv(
+                "GEMINI_API_KEY", ""
+            ).strip()
             if not api_key:
                 logger.warning("GOOGLE_API_KEY not configured for debrief evaluation")
                 return _fallback_report()
 
             client = genai.Client(api_key=api_key)
             response = client.models.generate_content(
-                model="gemini-3.6-flash",
+                model=os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
                 contents=prompt,
                 config={"response_mime_type": "application/json"},
             )

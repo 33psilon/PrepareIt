@@ -32,6 +32,29 @@ const CodeContext = createContext<CodeContextValue>({
 
 const useCode = () => useContext(CodeContext);
 
+type ProblemOption = { slug: string; title: string; difficulty: string; source: string };
+
+const RANDOM_PROBLEM_SLUG = 'random-amazon-sde1';
+
+const fallbackProblemOptions: ProblemOption[] = [
+  { slug: RANDOM_PROBLEM_SLUG, title: 'Random Amazon SDE I', difficulty: 'Easy / Medium', source: 'leetcode' },
+  { slug: 'contains-duplicate', title: 'Contains Duplicate', difficulty: 'Easy', source: 'leetcode' },
+  { slug: 'valid-palindrome', title: 'Valid Palindrome', difficulty: 'Easy', source: 'leetcode' },
+  { slug: 'valid-parentheses', title: 'Valid Parentheses', difficulty: 'Easy', source: 'leetcode' },
+  { slug: 'reverse-linked-list', title: 'Reverse Linked List', difficulty: 'Easy', source: 'leetcode' },
+  { slug: 'merge-two-sorted-lists', title: 'Merge Two Sorted Lists', difficulty: 'Easy', source: 'leetcode' },
+  { slug: 'binary-search', title: 'Binary Search', difficulty: 'Easy', source: 'leetcode' },
+  { slug: 'best-time-to-buy-and-sell-stock', title: 'Best Time to Buy and Sell Stock', difficulty: 'Easy', source: 'leetcode' },
+  { slug: 'maximum-subarray', title: 'Maximum Subarray', difficulty: 'Medium', source: 'leetcode' },
+  { slug: 'group-anagrams', title: 'Group Anagrams', difficulty: 'Medium', source: 'leetcode' },
+  { slug: 'product-of-array-except-self', title: 'Product of Array Except Self', difficulty: 'Medium', source: 'leetcode' },
+  { slug: 'longest-substring-without-repeating-characters', title: 'Longest Substring Without Repeating Characters', difficulty: 'Medium', source: 'leetcode' },
+  { slug: 'top-k-frequent-elements', title: 'Top K Frequent Elements', difficulty: 'Medium', source: 'leetcode' },
+  { slug: 'merge-intervals', title: 'Merge Intervals', difficulty: 'Medium', source: 'leetcode' },
+  { slug: 'number-of-islands', title: 'Number of Islands', difficulty: 'Medium', source: 'leetcode' },
+  { slug: 'two-sum', title: 'Two Sum', difficulty: 'Easy', source: 'leetcode' },
+];
+
 const pipecatClient = new PipecatClient({
   transport: new SmallWebRTCTransport(),
   enableMic: true,
@@ -326,7 +349,17 @@ function LegacyAIInterviewPanel() {
 
 void LegacyAIInterviewPanel;
 
-function AIInterviewPanel() {
+function AIInterviewPanel({
+  problemSlug,
+  problemReady,
+  startRequested,
+  onConnectionEnd,
+}: {
+  problemSlug: string;
+  problemReady: boolean;
+  startRequested: boolean;
+  onConnectionEnd: () => void;
+}) {
   const client = usePipecatClient();
   const [isConnected, setIsConnected] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
@@ -358,7 +391,8 @@ function AIInterviewPanel() {
       setIsConnected(false);
       setConnectionStatus('Disconnected');
       setIsThinking(false);
-    }, []),
+      onConnectionEnd();
+    }, [onConnectionEnd]),
   );
   useRTVIClientEvent(
     RTVIEvent.TrackStarted,
@@ -370,10 +404,9 @@ function AIInterviewPanel() {
   );
 
   const handleConnect = useCallback(async () => {
-    if (!client) return;
+    if (!client || !problemReady || !problemSlug) return;
     try {
       setConnectionStatus('Connecting...');
-      const problemSlug = new URLSearchParams(window.location.search).get('slug') || 'two-sum';
       await client.connect({
         webrtcRequestParams: {
           endpoint: '/api/offer',
@@ -382,16 +415,21 @@ function AIInterviewPanel() {
       });
     } catch (error) {
       console.error('Connection failed:', error);
-      setConnectionStatus('Connection Failed');
+      setConnectionStatus(error instanceof Error ? `Connection failed: ${error.message}` : 'Connection failed');
+      onConnectionEnd();
     }
-  }, [client]);
+  }, [client, onConnectionEnd, problemReady, problemSlug]);
 
   useEffect(() => {
-    if (!client || connectionAttemptedRef.current || isConnected) return;
+    if (!startRequested) {
+      connectionAttemptedRef.current = false;
+      return;
+    }
+    if (!client || !problemReady || connectionAttemptedRef.current || isConnected) return;
 
     connectionAttemptedRef.current = true;
     void handleConnect();
-  }, [client, handleConnect, isConnected]);
+  }, [client, handleConnect, isConnected, problemReady, startRequested]);
 
   const handleDisconnect = useCallback(async () => {
     if (!client) return;
@@ -399,7 +437,8 @@ function AIInterviewPanel() {
     setIsConnected(false);
     setConnectionStatus('Disconnected');
     setIsThinking(false);
-  }, [client]);
+    onConnectionEnd();
+  }, [client, onConnectionEnd]);
 
   const toggleMic = useCallback(() => {
     if (!client || !isConnected) return;
@@ -440,7 +479,7 @@ function AIInterviewPanel() {
           <span className="h-2 w-2 rounded-full bg-[#e6ff82] shadow-[0_0_12px_#e6ff82]" />
           <p className="truncate text-sm font-semibold">AI Interviewer</p>
         </div>
-        <p className="mt-1 truncate text-xs text-zinc-500">{isThinking ? 'Thinking...' : isConnected ? 'Live voice feedback enabled' : 'Connecting...'}</p>
+        <p className="mt-1 truncate text-xs text-zinc-500">{isThinking ? 'Thinking...' : isConnected ? 'Live voice feedback enabled' : startRequested ? 'Connecting...' : 'Ready when you are'}</p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <span className={`hidden rounded-full border px-3 py-2 text-xs font-medium md:block ${
@@ -550,7 +589,14 @@ function CodeEditor() {
 
 function Interviewer() {
   const [problem, setProblem] = useState<GroundedProblem | null>(null);
+  const [problemError, setProblemError] = useState('');
+  const [selectedSlug, setSelectedSlug] = useState(
+    () => new URLSearchParams(window.location.search).get('slug') || RANDOM_PROBLEM_SLUG,
+  );
+  const [problemOptions, setProblemOptions] = useState<ProblemOption[]>(fallbackProblemOptions);
+  const [startRequested, setStartRequested] = useState(false);
   const [code, setCode] = useState(`// Welcome to your AI Mock DSA Interview\n// Waiting for problem from interviewer...\n\n`);
+  const handleConnectionEnd = useCallback(() => setStartRequested(false), []);
   const editorRef = useRef<any>(null);
   const navigate = useNavigate();
 
@@ -560,22 +606,39 @@ function Interviewer() {
   }, []);
 
   useEffect(() => {
-    const slug = new URLSearchParams(window.location.search).get('slug') || 'two-sum';
-    fetch(`/api/problem/${encodeURIComponent(slug)}`)
-      .then((response) => response.ok ? response.json() : null)
-      .then((data) => setProblem(data || {
-        id: '1', source: 'leetcode', title: 'Two Sum', difficulty: 'Easy',
-        description: 'Given an array of integers nums and an integer target, return the indices of the two numbers that add up to target.',
-        constraints: ['2 <= nums.length <= 10^4', 'Exactly one solution exists.'],
-        examples: [{ input: 'nums = [2,7,11,15], target = 9', output: '[0,1]', explanation: 'The two numbers add up to the target.' }],
-        time_target: 'O(n)', space_target: 'O(n)',
-      }))
-      .catch(() => setProblem({
-        id: '1', source: 'leetcode', title: 'Two Sum', difficulty: 'Easy',
-        description: 'Given an array of integers nums and an integer target, return the indices of the two numbers that add up to target.',
-        constraints: ['2 <= nums.length <= 10^4', 'Exactly one solution exists.'], examples: [], time_target: 'O(n)', space_target: 'O(n)',
-      }));
+    const controller = new AbortController();
+    fetch('/api/problems', { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Problem list is unavailable.');
+        return response.json();
+      })
+      .then((options: ProblemOption[]) => {
+        if (Array.isArray(options) && options.length > 0) setProblemOptions(options);
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') console.warn('Using the built-in problem list:', error);
+      });
+    return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setProblem(null);
+    setProblemError('');
+    fetch(`/api/problem/${encodeURIComponent(selectedSlug)}`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.detail || 'Problem details could not be loaded.');
+        }
+        return response.json();
+      })
+      .then((data) => setProblem(data))
+      .catch((error) => {
+        if (error.name !== 'AbortError') setProblemError(error.message || 'Problem details could not be loaded.');
+      });
+    return () => controller.abort();
+  }, [selectedSlug]);
 
   const appendCode = useCallback((newCode: string) => {
     setCode((prevCode) => prevCode + newCode);
@@ -642,12 +705,34 @@ function Interviewer() {
                 <h1 className="text-lg font-semibold tracking-[-0.03em]">Live interview studio</h1>
               </div>
             </div>
-            <span className="hidden text-xs text-zinc-400 sm:inline">DSA Expert - 45 min</span>
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedSlug}
+                onChange={(event) => setSelectedSlug(event.target.value)}
+                disabled={startRequested}
+                className="max-w-52 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-2 text-xs text-white outline-none focus:border-violet-400 disabled:opacity-60 sm:max-w-72"
+                aria-label="Choose interview problem"
+              >
+                {problemOptions.map((option) => (
+                  <option key={option.slug} value={option.slug}>
+                    {option.title} · {option.difficulty}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => setStartRequested(true)}
+                disabled={!problem || startRequested}
+                className="rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-violet-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {startRequested ? 'Starting…' : problem ? 'Start interview' : 'Loading problem…'}
+              </button>
+            </div>
           </div>
 
         <div className="flex h-[calc(100dvh-4.5rem)] min-h-0 flex-col overflow-hidden rounded-b-[1.5rem] border border-t-0 border-zinc-800 bg-black shadow-[0_24px_70px_-38px_rgba(0,0,0,0.55)] lg:flex-row">
-            <div className="h-[38%] min-h-0 w-full shrink-0 border-b border-zinc-800 lg:h-full lg:w-[40%] lg:shrink lg:border-b-0 lg:border-r"><ProblemPanel problem={problem} /></div>
-            <div className="flex h-[62%] min-h-0 w-full flex-1 flex-col lg:h-full lg:w-[60%]"><div className="min-h-0 flex-1"><CodeEditor /></div><div className="h-[5.5rem] shrink-0 border-t border-zinc-800"><AIInterviewPanel /></div></div>
+            <div className="h-[38%] min-h-0 w-full shrink-0 border-b border-zinc-800 lg:h-full lg:w-[40%] lg:shrink lg:border-b-0 lg:border-r"><ProblemPanel problem={problem} error={problemError} /></div>
+            <div className="flex h-[62%] min-h-0 w-full flex-1 flex-col lg:h-full lg:w-[60%]"><div className="min-h-0 flex-1"><CodeEditor /></div><div className="h-[5.5rem] shrink-0 border-t border-zinc-800"><AIInterviewPanel problemSlug={problem?.slug || selectedSlug} problemReady={Boolean(problem)} startRequested={startRequested} onConnectionEnd={handleConnectionEnd} /></div></div>
           </div>
         </div>
       </PipecatClientProvider>

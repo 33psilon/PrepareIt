@@ -29,7 +29,7 @@ The Vite development server proxies `/api` requests to the Pipecat server on `lo
 ## Requirements
 
 - Node.js 20+ and npm
-- Python 3.10+
+- Python 3.12+
 - API credentials for Deepgram, Google AI, and Cartesia
 - A Clerk application and its frontend publishable key
 
@@ -42,17 +42,14 @@ cd server
 cp .env.example .env
 ```
 
-Add your service credentials to `server/.env`. Then install the Python dependencies and start the bot:
+Add your service credentials to `server/.env`. From `server/`, install the locked Python dependencies and start the bot:
 
 ```bash
-python -m venv .venv
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-# macOS / Linux:      source .venv/bin/activate
-pip install -r requirements.txt
-python bot.py
+uv sync
+uv run bot.py
 ```
 
-Alternatively, install [uv](https://docs.astral.sh/uv/) and use `uv sync` followed by `uv run bot.py`.
+The `/health` endpoint reports which voice provider credentials are missing. The interview studio defaults to a random question from its curated Amazon SDE I pool; choose a specific question from the problem menu before starting if preferred.
 
 In a second terminal, configure and start the web client:
 
@@ -71,7 +68,10 @@ Set `VITE_CLERK_PUBLISHABLE_KEY` in `client-custom/.env`, then open the local UR
 | --- | --- | --- |
 | `DEEPGRAM_API_KEY` | Server | Speech recognition |
 | `CARTESIA_API_KEY` | Server | Text-to-speech |
-| `GOOGLE_API_KEY` | Server | Gemini interview and evaluation |
+| `GOOGLE_API_KEY` or `GEMINI_API_KEY` | Server | Gemini interview and evaluation |
+| `GEMINI_MODEL` | Server | Optional Gemini model override |
+| `DEEPGRAM_MODEL` | Server | Optional speech recognition model override |
+| `CARTESIA_MODEL` | Server | Optional speech synthesis model override |
 | `VITE_CLERK_PUBLISHABLE_KEY` | Client | Clerk sign-in |
 
 Templates are in `server/.env.example` and `client-custom/.env.example`. Keep real credentials in local `.env` files; they are ignored by Git.
